@@ -1,0 +1,41 @@
+# image: peterkracik/dev-image:4fa0bcc
+image:
+  file: .gitpod/Dockerfile
+
+# List the start up tasks. Learn more https://www.gitpod.io/docs/config-start-tasks/
+tasks:
+  - name: Terminal
+    command: >
+      echo "";
+      echo "Commands you can try:";
+      echo " * apachectl stop";
+      echo " * apachectl start";
+      echo " * gp open /var/log/apache2/access.log";
+      echo " * gp open /var/log/apache2/error.log";
+  - name: Apache
+    command: >
+      apachectl start &&
+      multitail /var/log/apache2/access.log -I /var/log/apache2/error.log
+  - name: build
+    before: |
+      cd app
+      composer install
+      doppler secrets download --no-file --format=env --token=$DOPPLER_TOKEN > .env
+    command: |
+      gp url 8080
+    openMode: split-right
+
+  - name: build
+    before: |
+      cd app
+      nvm install 14
+      npm i
+    command: |
+      npm run start
+    openMode: split-right
+
+# List the ports to expose. Learn more https://www.gitpod.io/docs/config-ports/
+ports:
+  - port: 8080
+    onOpen: open-browser
+    visibility: public

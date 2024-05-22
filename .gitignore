@@ -1,0 +1,10 @@
+.DS_STORE
+/wp-config.php
+/assets
+/app/html/wp-content/cache/*
+/app/html/wp-content/wptouch-data
+/_docker
+/.env
+app/html/wp-content/uploads
+app/html/wp-content/uploads/2020/11
+app/html/wp-content/themes/turistika/assets

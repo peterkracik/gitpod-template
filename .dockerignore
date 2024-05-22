@@ -1,0 +1,5 @@
+.git
+_docker
+/assets
+/gitlab-ci.yml
+/wp-config.php

@@ -1,0 +1,183 @@
+# Use the latest 2.1 version of CircleCI pipeline process engine.
+# See: https://circleci.com/docs/2.0/configuration-reference
+version: 2.1
+
+orbs:
+  gh: circleci/github-cli@2.0
+
+parameters:
+  image:
+    type: string
+    default: "$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME"
+  port:
+    type: string
+    default: $SSH_PORT
+  version:
+    type: string
+    default: ''
+
+
+# Invoke jobs via workflows
+# See: https://circleci.com/docs/2.0/configuration-reference/#workflows
+workflows:
+  version: 2
+  # staging:
+  #   jobs:
+  #     - build:
+  #         context: pk-dev
+  #         filters:
+  #           branches:
+  #             only:
+  #               - master
+  #               - main
+  #     - deploy-to-cluster:
+  #         context: pk-dev
+  #         requires:
+  #           - build
+
+  production:
+    jobs:
+      - build-prod:
+          context: pk-dev
+          filters:
+            tags:
+              only: /^v.*/
+            branches:
+              ignore: /.*/
+      # - hold-for-approval:
+      #     type: approval
+      #     requires:
+      #       - build-prod
+      - deploy-to-prod:
+          context: pk-dev
+          requires:
+            - build-prod
+          filters:
+            tags:
+              only: /^v.*/
+            branches:
+              ignore: /.*/
+
+jobs:
+  build:
+    # resource_class: pk-dev/gcloud
+    docker:
+      - image: cimg/base:2022.06
+        auth:
+          username: $DOCKERHUB_USER
+          password: $DOCKERHUB_TOKEN  # context / project UI env-var reference
+    steps:
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - checkout
+      - run:
+          name: "Build docker image"
+          command: |
+            echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USER --password-stdin
+            docker pull << pipeline.parameters.image >>
+            docker build . -t << pipeline.parameters.image >>:$CIRCLE_BRANCH --target=app-prod
+            docker build . -t << pipeline.parameters.image >> --target=app-prod
+      - run:
+          name: "Push to registry"
+          command: |
+            docker push << pipeline.parameters.image >>:$CIRCLE_BRANCH
+            docker push << pipeline.parameters.image >>
+      # - run:
+      #     name: "Create helm chart"
+      #     command:
+      #       helm create ops/chart
+      #       docker tag << pipeline.parameters.image >>:$CIRCLE_BRANCH << pipeline.parameters.image >>:$CIRCLE_BRANCH
+      - persist_to_workspace:
+          root: .
+          paths:
+            - ops
+            - .env.template
+
+  deploy-to-cluster:
+    # resource_class: pk-dev/gcloud
+    docker:
+      - image: peterkracik/cimg-kubernetes
+    steps:
+      - attach_workspace:
+          at: .
+
+      - run:
+          name: "Deploy"
+          command: |
+            export IMAGE=<< pipeline.parameters.image>>:$CIRCLE_BRANCH
+            export SHA=$CIRCLE_SHA1
+            export TAG=$CIRCLE_BRANCH
+            export PROJECT_NAME=$CIRCLE_PROJECT_REPONAME
+            echo $GCLOUD_SERVICE_KEY > ${HOME}/gcloud-service-key.json
+            gcloud auth activate-service-account --key-file ${HOME}/gcloud-service-key.json
+            gcloud container clusters get-credentials pk-cloud --zone europe-central2-a --project pk-dev-285305
+            ./ops/kubernetes/deploy.sh
+  build-prod:
+    parameters:
+      version:
+        type: string
+        default: $CIRCLE_TAG
+    # resource_class: pk-dev/gcloud
+    docker:
+      - image: cimg/base:2022.06
+        auth:
+          username: $DOCKERHUB_USER
+          password: $DOCKERHUB_TOKEN  # context / project UI env-var reference
+    steps:
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - checkout
+
+      - run:
+          name: "Build docker image"
+          command: |
+            echo "APP_VERSION=<< parameters.version >>" >> .env.template
+            docker build . -t << pipeline.parameters.image >>:<< parameters.version >> --target=prod-deploy
+      - run:
+          name: "Push to registry"
+          command: |
+            echo $DOCKERHUB_TOKEN | docker login -u $DOCKERHUB_USER --password-stdin
+            docker push << pipeline.parameters.image >>:<< parameters.version >>
+
+  deploy-to-prod:
+    parameters:
+      version:
+        type: string
+        default: $CIRCLE_TAG
+      port:
+        type: string
+        default: $SSH_PORT
+      path:
+        type: string
+        default: $SSH_PATH
+    docker:
+      - image: << pipeline.parameters.image >>:<< parameters.version >>
+        auth:
+          username: $DOCKERHUB_USER
+          password: $DOCKERHUB_TOKEN
+    resource_class: medium
+
+    steps:
+      - run:
+          name: "Add private key"
+          command: |
+            echo "$SSH_PRIVATE_KEY" > "/root/.ssh/id_dsa"
+            chmod 0600 /root/.ssh/id_dsa
+      # - run:
+      #     name: "Set .env file"
+      #     command: |
+      #       cd /app
+      #       doppler secrets substitute --token=$DOPPLER_TOKEN_PROD --config=prd .env > .env.tmp
+      #       mv .env.tmp .env
+
+      - run:
+          name: "Deploy"
+          command: |
+            cd /app
+            DEST="$SSH_USER@$SSH_HOST:$SSH_PATH"
+            rsync -rltgoDzvO -e "ssh -p << parameters.port >>" . $DEST
+
+      - run:
+          name: "Clean cache"
+          command: |
+            ssh -p << parameters.port >> $SSH_USER@$SSH_HOST "cd << parameters.path >>; rm -rf web/wp-content/cache/*; pwd; sed -i 's/^APP_VERSION=.*/APP_VERSION=<< parameters.version >>/' << parameters.path >>/.env"
